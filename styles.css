@@ -141,7 +141,7 @@
   box-shadow: var(--shadow-l, 0 10px 30px rgba(0,0,0,.3));
   font-size: 13px; color: var(--text-normal);
 }
-.qtl-pop.qtl-pop-sheet { left: 8px; right: 8px; bottom: 8px; width: auto; }
+.qtl-pop.qtl-pop-sheet { left: 8px; right: 8px; top: 8px; bottom: auto; width: auto; overflow-y: auto; }
 .qtl-pop input { font-size: 13px; }
 .qtl-pop-title { width: 100%; box-sizing: border-box; }
 .qtl-pop input { box-sizing: border-box; max-width: 100%; }
@@ -193,3 +193,15 @@
 .qtl-head > .qtl-chev, .qtl-head > .qtl-head-range, .qtl-head > .qtl-day { flex-shrink: 0; overflow: visible; }
 .qtl-head > .qtl-spacer { flex: 1 1 8px; min-width: 8px; }
 .qtl-head > .qtl-head-stat { flex-shrink: 4; }
+
+/* small + in the header (replaces the old collapse arrow) */
+.qtl-plus {
+  flex: 0 0 auto !important; width: 18px; height: 18px; padding: 0; margin: 0 2px 0 -2px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 5px; border: none; box-shadow: none; background: transparent;
+  color: var(--text-muted); cursor: pointer; overflow: visible !important;
+}
+.qtl-plus svg { width: 10px; height: 10px; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; fill: none; }
+.qtl-plus:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+@media (pointer: coarse) { .qtl-plus { width: 26px; height: 22px; } }
+.qtl-pop-create .qtl-pop-title { font-weight: 600; }

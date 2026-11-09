@@ -1,7 +1,7 @@
 {
   "id": "quotidian-timeline",
   "name": "Quotidian Timeline",
-  "version": "0.7.2",
+  "version": "0.8.2",
   "minAppVersion": "1.4.0",
   "description": "Draws a compact day timeline under timed checklist items like '- [ ] (11:15-1:00) Task'.",
   "author": "Lukas",

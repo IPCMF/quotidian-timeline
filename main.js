@@ -16,7 +16,7 @@ const COLOR_EMOJI = [
 const EMOJI_HEX = Object.fromEntries(COLOR_EMOJI.map(([e, h]) => [e, h]));
 const EMOJI_RE = /(🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫)️?/gu;
 
-const VERSION = '0.7.2';
+const VERSION = '0.8.2';
 
 const DEFAULT_SETTINGS = {
   folder: '',             // '' = any note named like "26.10.08, ..."
@@ -214,7 +214,7 @@ function applyOp(lines, op) {
 /* Insert a task line into the Today/Tomorrow section of another note's text. */
 function insertIntoDay(data, text, S) {
   const lines = data.split('\n');
-  const newT = parseTasks([text], 0, S)[0];
+  const newT = parseTasks([text.split('\n')[0]], 0, S)[0];
   let h = lines.findIndex(l => /^#{1,6}\s.*(today|tomorrow)/i.test(l));
   if (h < 0) h = lines.findIndex(l => /^#{1,6}\s/.test(l));
   if (h < 0) { lines.unshift(text); return lines.join('\n'); }
@@ -224,12 +224,54 @@ function insertIntoDay(data, text, S) {
   const after = newT ? sec.find(x => x.start > newT.start) : null;
   let i;
   if (after) i = after.line;
+  else if (sec.length) i = sec[sec.length - 1].line + 1;
   else {
-    i = end - 1;
-    while (i > h && !/^\s*[-*+]\s/.test(lines[i])) i--;
-    i += 1;
+    const ph = lines.findIndex((l, k) => k > h && k < end && PLACEHOLDER_RE.test(l));
+    if (ph >= 0) { lines[ph] = text; return lines.join('\n'); }
+    const rule = lines.findIndex((l, k) => k > h && k < end && /^\s*-{3,}\s*$/.test(l));
+    if (rule >= 0) i = rule;
+    else {
+      i = end - 1;
+      while (i > h && !/^\s*[-*+]\s/.test(lines[i])) i--;
+      i += 1;
+    }
   }
   lines.splice(i, 0, text);
+  return lines.join('\n');
+}
+
+/* ---------- plain to-dos (send to tomorrow) ---------- */
+
+const TASK_LINE_RE = /^\s*[-*+]\s+\[.\]\s+/;
+const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
+/* A task line plus its indented sub-items: [start, endExclusive] */
+function taskBlockAt(lines, i) {
+  const base = indentOf(lines[i]);
+  let j = i + 1;
+  while (j < lines.length && lines[j].trim() && indentOf(lines[j]) > base) j++;
+  return [i, j];
+}
+function headingAbove(lines, i) {
+  for (let k = i; k >= 0; k--) if (/^#{1,6}\s/.test(lines[k])) return lines[k];
+  return null;
+}
+function dedent(block) {
+  const ind = block[0].match(/^\s*/)[0];
+  return block.map(l => (l.startsWith(ind) ? l.slice(ind.length) : l));
+}
+/* Put untimed to-dos into the Today section: replace a "To-do N" placeholder, else after the last list item. */
+function insertUntimedIntoDay(data, block) {
+  const lines = data.split('\n');
+  let h = lines.findIndex(l => /^#{1,6}\s.*(today|tomorrow)/i.test(l));
+  if (h < 0) h = lines.findIndex(l => /^#{1,6}\s/.test(l));
+  if (h < 0) { lines.unshift(...block); return lines.join('\n'); }
+  let end = lines.findIndex((l, i) => i > h && /^#{1,6}\s/.test(l));
+  if (end < 0) end = lines.length;
+  const ph = lines.findIndex((l, k) => k > h && k < end && /^\s*[-*+]\s+\[ \]\s+to-?do\s*\d*\s*$/i.test(l));
+  if (ph >= 0) { lines.splice(ph, 1, ...block); return lines.join('\n'); }
+  let i = end - 1;
+  while (i > h && !/^\s*[-*+]\s/.test(lines[i])) i--;
+  lines.splice(i + 1, 0, ...block);
   return lines.join('\n');
 }
 
@@ -313,9 +355,9 @@ function renderTimeline(tl, settings, opts = {}) {
   const { gaps, busy } = freeGaps(tasks);
   const free = gaps.reduce((a, [s, e]) => a + e - s, 0);
   const head = el('div', 'qtl-head');
-  const chev = el('span', 'qtl-chev', opts.collapsed ? '▸' : '▾');
+  let openCreateFromPlus = null;
+  if (opts.api) head.append(plusButton(btn => openCreateFromPlus && openCreateFromPlus(btn)));
   head.append(
-    chev,
     el('span', 'qtl-head-range', `${fmtClock(minS)} → ${fmtClock(maxE)}`),
     el('span', 'qtl-head-stat', `${fmtDur(busy)} planned`),
     el('span', 'qtl-head-stat', free ? `${fmtDur(free)} free` : 'back-to-back'),
@@ -403,7 +445,9 @@ function renderTimeline(tl, settings, opts = {}) {
 
   let closePopup = () => {};
   if (opts.api) {
-    attachInteractions({ root, lane, scroll, tl, ws, we, pxm, S, opts, metaText, y,
+    const openCreate = (a, b, anchor, onClose) => { closePopup(); closePopup = openPopup(null, anchor, tl, S, opts, { start: a, end: b, onClose }); };
+    openCreateFromPlus = btn => { const a = defaultStart(tasks, opts, S); openCreate(a, a + 60, btn); };
+    attachInteractions({ root, lane, scroll, tl, ws, we, pxm, S, opts, metaText, y, openCreate,
       openPopup: (t, anchor) => { closePopup(); closePopup = openPopup(t, anchor, tl, S, opts); } });
   }
   const cleanupFn = () => { if (timer) clearTimeout(timer); closePopup(); };
@@ -418,11 +462,34 @@ function renderTimeline(tl, settings, opts = {}) {
   return wrapNav(root, S, opts, cleanupFn);
 }
 
+/* Where a new block should start: after the last task, never in the past on today's note. */
+function defaultStart(tasks, opts, S) {
+  let a = tasks.length ? Math.max(...tasks.map(t => t.end)) : S.fixedStartHour * 60;
+  if (opts.today) {
+    const d = opts.now ? opts.now() : new Date();
+    const nowUp = Math.ceil((d.getHours() * 60 + d.getMinutes()) / 15) * 15;
+    a = tasks.length ? Math.max(a, nowUp) : nowUp;
+  }
+  return Math.min(23 * 60, a);
+}
+function plusButton(onClick) {
+  const b = el('button', 'qtl-plus');
+  b.type = 'button'; b.title = 'Add a task'; b.setAttribute('aria-label', 'Add a task');
+  b.innerHTML = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1.5v7M1.5 5h7"/></svg>';
+  b.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+  b.addEventListener('pointerdown', e => e.stopPropagation());
+  b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); onClick(b); });
+  return b;
+}
+
 /* Shown when a day note has no timed tasks yet: header + one full-width Add bar. */
 function renderEmpty(tl, settings, opts = {}) {
   const S = Object.assign({}, DEFAULT_SETTINGS, settings);
   const root = el('div', 'qtl qtl-empty');
   const head = el('div', 'qtl-head');
+  let closePopup = () => {};
+  const create = anchor => { const a = defaultStart([], opts, S); closePopup(); closePopup = openPopup(null, anchor, tl, S, opts, { start: a, end: a + 60 }); };
+  if (opts.api) head.append(plusButton(create));
   head.append(el('span', 'qtl-head-stat', 'No times yet'), el('span', 'qtl-spacer'));
   const badge = dayBadge(opts.date);
   if (badge) head.append(badge);
@@ -430,20 +497,12 @@ function renderEmpty(tl, settings, opts = {}) {
   if (opts.api) {
     const add = el('div', 'qtl-add');
     add.style.height = S.pxPerHour + 'px';
-    add.append(el('span', 'qtl-add-plus', '+'), el('span', 'qtl-add-text', 'Add a 1-hour block'));
-    const pickStart = () => {
-      if (opts.today) { const d = new Date(); return Math.min(23 * 60, (d.getHours() + (d.getMinutes() ? 1 : 0)) * 60); }
-      return S.fixedStartHour * 60;
-    };
+    add.append(el('span', 'qtl-add-plus', '+'), el('span', 'qtl-add-text', 'Add a task'));
     add.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
-    add.addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      const a = pickStart();
-      opts.api.insertFirst(tl, a, a + 60);
-    });
+    add.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); create(add); });
     root.append(add);
   }
-  return wrapNav(root, S, opts, () => {});
+  return wrapNav(root, S, opts, () => closePopup());
 }
 
 function wrapNav(root, S, opts, cleanupFn) {
@@ -547,7 +606,10 @@ function attachInteractions(c) {
     if (!st || e.pointerId !== st.id) return;
     const s = st;
     if (s.active) {
-      if (s.kind === 'create') { cleanup(); api.insert(tl, s.a, s.b); }
+      if (s.kind === 'create') {
+        const ghost = s.ghost; s.ghost = null; cleanup();
+        c.openCreate(s.a, s.b, ghost, () => ghost.remove());
+      }
       else if (s.kind === 'move') {
         if (s.a !== s.t.start) { cleanup(); api.update(s.t, { start: s.a, end: s.b }); }
         else { restore(); cleanup(); }
@@ -580,18 +642,28 @@ function attachInteractions(c) {
   });
   // stop iPad scrolling once a long-press drag is active
   lane.addEventListener('touchmove', e => { if (st && st.active) e.preventDefault(); }, { passive: false });
-  lane.addEventListener('contextmenu', e => { if (st) e.preventDefault(); });
+  lane.addEventListener('contextmenu', e => {
+    if (st && st.active) { e.preventDefault(); return; }
+    const bEl = e.target.closest('.qtl-block');
+    if (!bEl || !api.contextMenu) { if (st) e.preventDefault(); return; }
+    e.preventDefault(); e.stopPropagation();
+    if (st) cleanup();
+    api.contextMenu(bEl._qtlTask, e, () => c.openPopup(bEl._qtlTask, bEl));
+  });
 }
 
 /* ---------- popup editor ---------- */
 
-function openPopup(t, anchor, tl, S, opts) {
+function openPopup(t, anchor, tl, S, opts, init) {
   const api = opts.api;
+  const creating = !t;
+  if (creating) t = { rest: '', start: init.start, end: init.end, open: false, color: null, done: false };
   const pop = el('div', 'qtl-pop');
+  if (creating) pop.classList.add('qtl-pop-create');
   const toTime = m => { m = ((m % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
   const fromTime = v => { const m = /^(\d{1,2}):(\d{2})/.exec(v || ''); return m ? +m[1] * 60 + +m[2] : null; };
 
-  const title = el('input', 'qtl-pop-title'); title.type = 'text'; title.value = t.rest; title.placeholder = 'Task (tags like #Ph work)';
+  const title = el('input', 'qtl-pop-title'); title.type = 'text'; title.value = t.rest; title.placeholder = creating ? 'New task (tags like #Ph work)' : 'Task (tags like #Ph work)';
   const row1 = el('div', 'qtl-pop-row');
   const sIn = el('input'); sIn.type = 'time'; sIn.step = 60 * (S.snapMinutes || 15); sIn.value = toTime(t.start);
   const eIn = el('input'); eIn.type = 'time'; eIn.step = 60 * (S.snapMinutes || 15); eIn.value = t.open ? '' : toTime(t.end);
@@ -640,14 +712,32 @@ function openPopup(t, anchor, tl, S, opts) {
     if (!armed) { armed = true; delB.textContent = 'Confirm delete'; return; }
     close(); api.remove(t);
   });
-  actions.append(doneB);
-  if (api.canFocus) {
-    const goB = el('button', 'qtl-btn', 'Go to line'); goB.type = 'button';
-    goB.addEventListener('click', ev => { ev.preventDefault(); close(); api.goto(t); });
-    actions.append(goB);
+  if (!creating) {
+    actions.append(doneB);
+    if (dIn) {
+      const tmB = el('button', 'qtl-btn', 'Tomorrow →'); tmB.type = 'button';
+      tmB.title = 'Move this task to the next day';
+      tmB.addEventListener('click', ev => {
+        ev.preventDefault();
+        const d = new Date(opts.date); d.setDate(d.getDate() + 1);
+        dIn.value = isoDate(d); save();
+      });
+      actions.append(tmB);
+    }
+    if (api.canFocus) {
+      const goB = el('button', 'qtl-btn', 'Go to line'); goB.type = 'button';
+      goB.addEventListener('click', ev => { ev.preventDefault(); close(); api.goto(t); });
+      actions.append(goB);
+    }
+    actions.append(delB);
   }
-  actions.append(delB, el('span', 'qtl-spacer'));
-  const saveB = el('button', 'qtl-btn mod-cta', 'Save'); saveB.type = 'button';
+  actions.append(el('span', 'qtl-spacer'));
+  if (creating) {
+    const cancelB = el('button', 'qtl-btn', 'Cancel'); cancelB.type = 'button';
+    cancelB.addEventListener('click', ev => { ev.preventDefault(); close(); });
+    actions.append(cancelB);
+  }
+  const saveB = el('button', 'qtl-btn mod-cta', creating ? 'Add' : 'Save'); saveB.type = 'button';
   actions.append(saveB);
 
   pop.append(title, row1);
@@ -663,7 +753,10 @@ function openPopup(t, anchor, tl, S, opts) {
     else { if (b <= a) b += 1440; ch.end = b; ch.open = false; }
     close();
     const newDate = dIn && dIn.value && dIn.value !== isoDate(opts.date) ? dIn.value : null;
-    if (newDate) api.moveToDate(t, ch, newDate);
+    if (creating) {
+      if (ch.open) { ch.open = false; ch.end = a + 60; }
+      api.create(tl, ch, newDate);
+    } else if (newDate) api.moveToDate(t, ch, newDate);
     else api.update(t, ch);
   };
   saveB.addEventListener('click', ev => { ev.preventDefault(); save(); });
@@ -677,8 +770,18 @@ function openPopup(t, anchor, tl, S, opts) {
   // position
   const r = anchor.getBoundingClientRect();
   const pw = pop.offsetWidth, ph = pop.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
-  if (vw < 520) pop.classList.add('qtl-pop-sheet');
-  else {
+  let unplace = () => {};
+  if (vw < 520) {
+    // phone: pin to the top of the *visible* area so the keyboard can't cover it
+    pop.classList.add('qtl-pop-sheet');
+    const vv = window.visualViewport;
+    const place = () => {
+      pop.style.top = ((vv ? vv.offsetTop : 0) + 8) + 'px';
+      pop.style.maxHeight = ((vv ? vv.height : window.innerHeight) - 16) + 'px';
+    };
+    place();
+    if (vv) { vv.addEventListener('resize', place); vv.addEventListener('scroll', place); unplace = () => { vv.removeEventListener('resize', place); vv.removeEventListener('scroll', place); }; }
+  } else {
     let left = r.right + 8;
     if (left + pw > vw - 8) left = Math.max(8, r.left - pw - 8);
     if (left < 8) left = Math.max(8, Math.min(vw - pw - 8, r.left));
@@ -692,7 +795,9 @@ function openPopup(t, anchor, tl, S, opts) {
   function close() {
     if (closed) return; closed = true;
     document.removeEventListener('pointerdown', outside, true);
+    unplace();
     pop.remove();
+    if (init && init.onClose) init.onClose();
   }
   if (!opts.isMobile) setTimeout(() => title.focus(), 0);
   return close;
@@ -718,6 +823,20 @@ function templateMatcher(tplText) {
   const re = new RegExp('^' + parts.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^\\n]*?') + '$');
   return text => text.trim() === '' || re.test(norm(text));
 }
+const LEGACY_TEMPLATE_LINES = ['- [ ] (Time-time) Do this', '- [ ] (Time-time) Do that'];
+/* A day note is "empty" if every line is blank, a heading, a --- rule, or a line that appears in the template
+   ({{...}} matches anything). Anything typed or ticked makes it not empty. */
+function emptyChecker(tplText) {
+  const norm = l => l.replace(/\r/g, '').replace(/\s+$/, '');
+  const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = (tplText || '').split('\n').map(norm).filter(l => l.trim()).concat(LEGACY_TEMPLATE_LINES);
+  const res = lines.map(l => new RegExp('^' + l.split(/{{[^}]*}}/).map(esc).join('.*?') + '$'));
+  return text => text.split('\n').map(norm).every(l => {
+    const x = l.trim();
+    if (!x || /^#{1,6}\s/.test(x) || /^(-{3,}|\*{3,}|_{3,})$/.test(x)) return true;
+    return res.some(re => re.test(l));
+  });
+}
 const parentDir = path => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 
 /* Make the api for one timeline, on top of an accessor that applies a planned op. */
@@ -741,6 +860,32 @@ function makeApi(plugin, acc, tl, path) {
       const op = await run(lines => planInsert(lines, tl2, a, b, acc.focusLine ? '' : 'New task', S));
       if (op && acc.focusLine) acc.focusLine(op.i);
     },
+    async create(tl2, ch, iso) {
+      const sty = styleFor(null, tl2.tasks, S);
+      let rest = (ch.rest || '').replace(EMOJI_RE, '').replace(/\s{2,}/g, ' ').trim();
+      if (ch.color) rest = rest ? `${rest} ${ch.color}` : ch.color;
+      if (iso) {
+        try {
+          const text = `- [ ] (${fmtWrite(ch.start, sty)}-${fmtWrite(ch.end, sty)}) ${rest}`.replace(/\s+$/, '');
+          const target = await plugin.insertIntoDate(text, iso, path);
+          new obsidian.Notice(`Added to ${target.basename}`);
+        } catch (err) { console.error(err); new obsidian.Notice('Quotidian Timeline: could not add task — ' + err.message); }
+        return;
+      }
+      return run(lines => (tl2.empty ? planFirstTask : planInsert)(lines, tl2, ch.start, ch.end, rest, S));
+    },
+    contextMenu(t, ev, openEdit) {
+      if (!obsidian || !obsidian.Menu) return;
+      const m = new obsidian.Menu();
+      const base = noteDate(path, tl.tomorrow) || new Date();
+      const next = new Date(base); next.setDate(next.getDate() + 1);
+      m.addItem(i => i.setTitle('Send to tomorrow').setIcon('calendar-plus').onClick(() => this.moveToDate(t, {}, isoDate(next))));
+      m.addItem(i => i.setTitle('Edit…').setIcon('pencil').onClick(openEdit));
+      m.addItem(i => i.setTitle(t.done ? 'Mark not done' : 'Mark done').setIcon('check').onClick(() => this.update(t, { done: !t.done })));
+      m.addSeparator();
+      m.addItem(i => { i.setTitle('Delete').setIcon('trash').onClick(() => this.remove(t)); if (i.setWarning) i.setWarning(true); });
+      m.showAtMouseEvent(ev);
+    },
     goto(t) { run(lines => { const i = locate(lines, t); if (i >= 0) acc.focusLine(i); return null; }); },
     async moveToDate(t, ch, iso) {
       const text = buildLine(t, ch, style(t));
@@ -760,6 +905,7 @@ let PluginBase = obsidian ? obsidian.Plugin : class {};
 
 class QuotidianTimelinePlugin extends PluginBase {
   async onload() {
+    this._readers = new Map();   // path -> Set of reading-view boxes
     const data = (await this.loadData()) || {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     this.settings.tagColors = Object.assign({}, data.tagColors || DEFAULT_SETTINGS.tagColors);
@@ -866,12 +1012,29 @@ class QuotidianTimelinePlugin extends PluginBase {
       if (!isTarget(ctx.sourcePath, this.settings.folder)) return;
       const info = ctx.getSectionInfo(elem);
       if (!info) return;
+      // Reading view: right-click a task item → Send to tomorrow
+      if (elem.querySelector('li[data-line]')) {
+        elem.addEventListener('contextmenu', ev => {
+          const li = ev.target.closest && ev.target.closest('li[data-line]');
+          if (!li || !elem.contains(li) || ev.target.closest('.qtl-reading-wrap')) return;
+          const cur = ctx.getSectionInfo(elem);
+          if (!cur) return;
+          const i = cur.lineStart + Number(li.getAttribute('data-line'));
+          if (!TASK_LINE_RE.test(cur.text.split('\n')[i] || '')) return;
+          ev.preventDefault(); ev.stopPropagation();
+          const f = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+          const menu = new obsidian.Menu();
+          menu.addItem(it => it.setTitle('Send to tomorrow').setIcon('calendar-plus').onClick(() => f && this.sendFromFile(f, i)));
+          menu.showAtMouseEvent(ev);
+        });
+      }
       const all = info.text.split('\n');
       const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
       const acc = {
         async run(planner) {
           let op = null;
           await plugin.app.vault.process(file, d => { const lines = d.split('\n'); op = planner(lines); return applyOp(lines, op).join('\n'); });
+          if (op) plugin.refreshReaders(file);
           return op;
         },
       };
@@ -879,22 +1042,35 @@ class QuotidianTimelinePlugin extends PluginBase {
         if (tl.anchor < info.lineStart || tl.anchor > info.lineEnd) continue;
         const holder = document.createElement('div');
         holder.className = 'qtl-reading-wrap';
-        const date = noteDate(ctx.sourcePath, tl.tomorrow);
-        const r = (tl.empty ? renderEmpty : renderTimeline)(tl, this.settings, {
-          today: sameDay(date, new Date()), date, isMobile,
-          collapsed: collapsed(), onToggleCollapse: toggle,
-          onNav: (step, create) => plugin.navDay(ctx.sourcePath, step, create),
-          api: file ? makeApi(plugin, acc, tl, ctx.sourcePath) : null,
-        });
-        holder.append(r);
+        const entry = { holder, path: ctx.sourcePath, start: tl.start, r: null };
+        entry.render = blk => {
+          if (entry.r && entry.r._qtlCleanup) entry.r._qtlCleanup();
+          holder.textContent = '';
+          entry.r = null;
+          if (!blk) return;
+          entry.start = blk.start;
+          const date = noteDate(ctx.sourcePath, blk.tomorrow);
+          entry.r = (blk.empty ? renderEmpty : renderTimeline)(blk, plugin.settings, {
+            today: sameDay(date, new Date()), date, isMobile,
+            collapsed: collapsed(), onToggleCollapse: toggle,
+            onNav: (step, create) => plugin.navDay(ctx.sourcePath, step, create),
+            api: file ? makeApi(plugin, acc, blk, ctx.sourcePath) : null,
+          });
+          holder.append(entry.r);
+        };
+        entry.render(tl);
         elem.append(holder);
+        plugin.addReader(entry);
         const child = new obsidian.MarkdownRenderChild(holder);
-        child.onunload = () => r._qtlCleanup && r._qtlCleanup();
+        child.onunload = () => { plugin.removeReader(entry); if (entry.r && entry.r._qtlCleanup) entry.r._qtlCleanup(); };
         ctx.addChild(child);
       }
     } catch (err) { console.error('[Quotidian Timeline]', err); } });
 
     this.registerEvent(this.app.workspace.on('file-open', () => this.refreshAll()));
+    // Reading view caches unchanged sections (our box hangs off the heading), so redraw on any change
+    this.registerEvent(this.app.vault.on('modify', f => { if (this._readers.has(f.path)) this.refreshReaders(f); }));
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.refreshAllReaders()));
     this.app.workspace.onLayoutReady(() => this.refreshAll());
     this.addSettingTab(new QTLSettingTab(this.app, this));
     const activePath = () => { const f = this.app.workspace.getActiveFile(); return f && f.path; };
@@ -908,19 +1084,38 @@ class QuotidianTimelinePlugin extends PluginBase {
       setTimeout(() => { if (this.settings.cleanupEnabled) this.runCleanup(false); }, 30000);
     });
     this.registerInterval(window.setInterval(() => { if (this.settings.cleanupEnabled) this.runCleanup(false); }, 6 * 3600 * 1000));
+    // Right-click any task line (timed or plain) in editing mode
+    this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor, view) => {
+      const file = view && view.file;
+      if (!file || !isTarget(file.path, this.settings.folder)) return;
+      const i = editor.getCursor().line;
+      if (!TASK_LINE_RE.test(editor.getLine(i))) return;
+      menu.addItem(it => it.setTitle('Send to tomorrow').setIcon('calendar-plus').onClick(() => this.sendFromEditor(editor, file, i)));
+    }));
+    // Command (for a hotkey or the iPad toolbar): sends the task the cursor is on
+    this.addCommand({
+      id: 'send-task-to-tomorrow', name: 'Send task to tomorrow', icon: 'calendar-plus',
+      editorCheckCallback: (checking, editor, view) => {
+        const file = view && view.file;
+        const ok = !!file && isTarget(file.path, this.settings.folder) && TASK_LINE_RE.test(editor.getLine(editor.getCursor().line));
+        if (ok && !checking) this.sendFromEditor(editor, file, editor.getCursor().line);
+        return ok;
+      },
+    });
     this.addCommand({ id: 'cleanup-empty-day-notes', name: 'Clean up empty day notes now', callback: () => this.runCleanup(true) });
     console.log(`[Quotidian Timeline] v${VERSION} loaded`);
   }
 
-  async insertIntoDate(text, iso, sourcePath) {
+  async insertIntoDate(text, iso, sourcePath, inserter) {
     const m = window.moment(iso, 'YYYY-MM-DD');
     const S = this.settings;
     const prefix = m.format('YY.MM.DD');
     const dir = parentDir(sourcePath || '');
     const candidates = this.app.vault.getMarkdownFiles().filter(f => f.basename.startsWith(prefix) && !/template/i.test(f.basename));
     let file = candidates.find(f => f.parent && f.parent.path === (dir || '/')) || candidates.find(f => isTarget(f.path, S.folder));
-    if (!file) file = await this.createDayNote(m, dir);
-    await this.app.vault.process(file, d => insertIntoDay(d, text, S));
+    // keep the template's placeholders; the inserter swaps out only the matching one
+    if (!file) file = await this.createDayNote(m, dir, true);
+    await this.app.vault.process(file, d => (inserter ? inserter(d) : insertIntoDay(d, text, S)));
     return file;
   }
 
@@ -976,7 +1171,7 @@ class QuotidianTimelinePlugin extends PluginBase {
       const dir = parentDir(f.path);
       if (!matchers.has(dir)) {
         const tpl = this.findTemplate(dir);
-        matchers.set(dir, tpl ? templateMatcher(await this.app.vault.cachedRead(tpl)) : (t => t.trim() === ''));
+        matchers.set(dir, emptyChecker(tpl ? await this.app.vault.cachedRead(tpl) : ''));
       }
       if (matchers.get(dir)(await this.app.vault.cachedRead(f))) out.push(f);
     }
@@ -1013,6 +1208,85 @@ class QuotidianTimelinePlugin extends PluginBase {
     return this.app.vault.create(`${folder ? folder + '/' : ''}${name}.md`, body);
   }
 
+  /* Copy the task (and its sub-items) at line i into the next day's note. Returns the source range to remove. */
+  async copyTaskToNextDay(path, lines, i) {
+    const [a, b] = taskBlockAt(lines, i);
+    const block = dedent(lines.slice(a, b));
+    const base = noteDate(path, /tomorrow/i.test(headingAbove(lines, i) || '')) || new Date();
+    const next = new Date(base); next.setDate(next.getDate() + 1);
+    const timed = parseTasks([block[0]], 0, this.settings).length > 0;
+    const target = await this.insertIntoDate(block.join('\n'), isoDate(next), path,
+      timed ? null : d => insertUntimedIntoDay(d, block));
+    return { a, b, original: lines.slice(a, b), target };
+  }
+
+  async sendFromEditor(editor, file, i) {
+    try {
+      const lines = editor.getValue().split('\n');
+      if (!TASK_LINE_RE.test(lines[i] || '')) return;
+      const r = await this.copyTaskToNextDay(file.path, lines, i);
+      // remove from this note (re-find it in case the text shifted)
+      const now = editor.getValue().split('\n');
+      let a = now.slice(r.a, r.b).join('\n') === r.original.join('\n') ? r.a
+        : now.findIndex((_, k) => now.slice(k, k + r.original.length).join('\n') === r.original.join('\n'));
+      if (a >= 0) {
+        const b = a + r.original.length;
+        if (b < now.length) editor.replaceRange('', { line: a, ch: 0 }, { line: b, ch: 0 });
+        else if (a > 0) editor.replaceRange('', { line: a - 1, ch: now[a - 1].length }, { line: b - 1, ch: now[b - 1].length });
+        else editor.replaceRange('', { line: 0, ch: 0 }, { line: b - 1, ch: now[b - 1].length });
+      }
+      new obsidian.Notice(`Sent to ${r.target.basename}`);
+    } catch (err) { console.error('[Quotidian Timeline]', err); new obsidian.Notice('Quotidian Timeline: ' + err.message); }
+  }
+
+  async sendFromFile(file, i) {
+    try {
+      const lines = (await this.app.vault.read(file)).split('\n');
+      if (!TASK_LINE_RE.test(lines[i] || '')) { new obsidian.Notice('Could not find that task in the file.'); return; }
+      const r = await this.copyTaskToNextDay(file.path, lines, i);
+      await this.app.vault.process(file, d => {
+        const now = d.split('\n'), want = r.original.join('\n');
+        const a = now.slice(r.a, r.b).join('\n') === want ? r.a
+          : now.findIndex((_, k) => now.slice(k, k + r.original.length).join('\n') === want);
+        if (a >= 0) now.splice(a, r.original.length);
+        return now.join('\n');
+      });
+      this.refreshReaders(file);
+      new obsidian.Notice(`Sent to ${r.target.basename}`);
+    } catch (err) { console.error('[Quotidian Timeline]', err); new obsidian.Notice('Quotidian Timeline: ' + err.message); }
+  }
+
+  addReader(entry) {
+    if (!this._readers.has(entry.path)) this._readers.set(entry.path, new Set());
+    this._readers.get(entry.path).add(entry);
+  }
+  removeReader(entry) {
+    const set = this._readers.get(entry.path);
+    if (set) { set.delete(entry); if (!set.size) this._readers.delete(entry.path); }
+  }
+  /* Re-draw reading-view boxes for a file straight from its current text (Obsidian caches the heading section). */
+  async refreshReaders(file) {
+    const set = this._readers.get(file.path);
+    if (!set || !set.size) return;
+    let text;
+    try { text = await this.app.vault.read(file); } catch (e) { return; }
+    const blocks = findBlocks(text.split('\n'), this.settings);
+    for (const entry of [...set]) {
+      if (!entry.holder.isConnected) { this.removeReader(entry); continue; }
+      try { entry.render(blocks.find(b => b.start === entry.start) || blocks[0] || null); }
+      catch (err) { console.error('[Quotidian Timeline]', err); }
+    }
+  }
+  refreshAllReaders() {
+    clearTimeout(this._rrTimer);
+    this._rrTimer = setTimeout(() => {
+      for (const p of [...this._readers.keys()]) {
+        const f = this.app.vault.getAbstractFileByPath(p);
+        if (f) this.refreshReaders(f); else this._readers.delete(p);
+      }
+    }, 80);
+  }
+
   refreshAll() {
     this.app.workspace.getLeavesOfType('markdown').forEach(leaf => {
       const v = leaf.view;
@@ -1020,6 +1294,7 @@ class QuotidianTimelinePlugin extends PluginBase {
       if (cm) cm.dispatch({ effects: this._refresh.of(null) });
       if (v && v.previewMode && v.getMode && v.getMode() === 'preview') v.previewMode.rerender(true);
     });
+    this.refreshAllReaders();
   }
 
   async saveSettings() {
@@ -1105,4 +1380,4 @@ class QTLSettingTab extends SettingTabBase {
 }
 
 module.exports = QuotidianTimelinePlugin;
-module.exports.__test = { findBlocks, planFirstTask, renderEmpty, relDay, templateMatcher, isTarget, VERSION, parseTasks, findTimelines, renderTimeline, buildLine, planInsert, applyOp, insertIntoDay, locate, styleFor, DEFAULT_SETTINGS };
+module.exports.__test = { taskBlockAt, insertUntimedIntoDay, dedent, headingAbove, emptyChecker, defaultStart, findBlocks, planFirstTask, renderEmpty, relDay, templateMatcher, isTarget, VERSION, parseTasks, findTimelines, renderTimeline, buildLine, planInsert, applyOp, insertIntoDay, locate, styleFor, DEFAULT_SETTINGS };
