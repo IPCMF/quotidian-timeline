@@ -16,7 +16,7 @@ const COLOR_EMOJI = [
 const EMOJI_HEX = Object.fromEntries(COLOR_EMOJI.map(([e, h]) => [e, h]));
 const EMOJI_RE = /(🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫)️?/gu;
 
-const VERSION = '0.9.2';
+const VERSION = '0.9.3';
 
 const DEFAULT_SETTINGS = {
   folder: '',             // '' = any note named like "26.10.08, ..."
@@ -790,12 +790,18 @@ function openPopup(t, anchor, tl, S, opts, init) {
   const pw = pop.offsetWidth, ph = pop.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
   let unplace = () => {};
   if (vw < 520) {
-    // phone: pin to the top of the *visible* area so the keyboard can't cover it
+    // phone: full-width sheet next to what you tapped, nudged up only as far as needed to stay above the keyboard
     pop.classList.add('qtl-pop-sheet');
     const vv = window.visualViewport;
     const place = () => {
-      pop.style.top = ((vv ? vv.offsetTop : 0) + 8) + 'px';
-      pop.style.maxHeight = ((vv ? vv.height : window.innerHeight) - 16) + 'px';
+      const top0 = vv ? vv.offsetTop : 0, h = vv ? vv.height : window.innerHeight;
+      const ar = anchor.getBoundingClientRect();
+      const ph2 = Math.min(pop.offsetHeight, h - 16);
+      let top = ar.bottom + 8;                                   // just under the tapped thing
+      if (top + ph2 > top0 + h - 8) top = ar.top - ph2 - 8;       // else just above it
+      top = Math.max(top0 + 8, Math.min(top, top0 + h - ph2 - 8)); // always fully visible
+      pop.style.top = top + 'px';
+      pop.style.maxHeight = (h - 16) + 'px';
     };
     place();
     if (vv) { vv.addEventListener('resize', place); vv.addEventListener('scroll', place); unplace = () => { vv.removeEventListener('resize', place); vv.removeEventListener('scroll', place); }; }
