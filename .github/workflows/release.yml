@@ -1,0 +1,25 @@
+# Publishes a GitHub release (main.js, manifest.json, styles.css) whenever manifest.json gets a new version.
+name: Release
+on:
+  push:
+    branches: [main, master]
+    paths: [manifest.json]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release if this version is new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          v=$(jq -r .version manifest.json)
+          if gh release view "$v" >/dev/null 2>&1; then
+            echo "Release $v already exists, nothing to do."
+            exit 0
+          fi
+          gh release create "$v" main.js manifest.json styles.css --title "$v" --notes "Quotidian Timeline $v"
