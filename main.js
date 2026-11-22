@@ -16,7 +16,7 @@ const COLOR_EMOJI = [
 const EMOJI_HEX = Object.fromEntries(COLOR_EMOJI.map(([e, h]) => [e, h]));
 const EMOJI_RE = /(🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫)️?/gu;
 
-const VERSION = '0.8.2';
+const VERSION = '0.9.0';
 
 const DEFAULT_SETTINGS = {
   folder: '',             // '' = any note named like "26.10.08, ..."
@@ -41,7 +41,11 @@ const DEFAULT_SETTINGS = {
 
 /* ---------- parsing ---------- */
 
-const TASK_RE = /^(\s*[-*+]\s+\[)(.)(\]\s+)\(\s*([^)\-–—]+?)\s*[-–—]\s*([^)]*?)\s*\)\s*(.*?)\r?$/;
+// "- [ ] (9:00-10:00) Task"  or, with no checkbox, "- (13:00-14:00) Lunch" (an event)
+const TASK_RE = /^(\s*[-*+]\s+)(?:\[(.)\]\s+)?\(\s*([^)\-–—]+?)\s*[-–—]\s*([^)]*?)\s*\)\s*(.*?)\r?$/;
+const EVENT_GREY = '#8b8d98';
+const PRIORITY = { hp: 'hp', mp: 'mp', lp: 'lp' };
+function priorityOf(tags) { for (const t of tags) { const k = t.toLowerCase(); if (PRIORITY[k]) return k; } return null; }
 const CLOCK_RE = /^(\d{1,2})(?:[:.h](\d{1,2}))?\s*(am|pm|a|p)?$/i;
 
 function parseClock(tok) {
@@ -67,18 +71,19 @@ function parseTasks(lines, lineOffset, settings) {
   lines.forEach((text, i) => {
     const m = TASK_RE.exec(text);
     if (!m) return;
-    const sc = parseClock(m[4]);
+    const sc = parseClock(m[3]);
     if (!sc) return;
     const start = resolveClock(sc, floor);
     let end, open = false;
-    const ec = parseClock(m[5]);
+    const ec = parseClock(m[4]);
     if (ec) {
       end = resolveClock(ec, start + 1);
       while (end <= start) end += 720;
     } else {
       end = start + 60; open = true;
     }
-    const rest = m[6].trim();
+    const rest = m[5].trim();
+    const box = m[2] !== undefined;
     const emojis = rest.match(EMOJI_RE) || [];
     const color = emojis.length ? emojis[emojis.length - 1].replace('️', '') : null;
     const restNoEmoji = rest.replace(EMOJI_RE, '').replace(/\s+/g, ' ').trim();
@@ -88,8 +93,9 @@ function parseTasks(lines, lineOffset, settings) {
     if (sc.h >= 13 || sc.h === 0 || (ec && (ec.h >= 13 || ec.h === 0))) style = '24';
     else if (!sc.ampm && (start >= 780 || end >= 780)) style = '12';
     tasks.push({
-      line: lineOffset + i, raw: text.replace(/\r$/, ''), pre: m[1], check: m[2], mid: m[3], endRaw: m[5],
-      done: m[2].trim() !== '', start, end, open, rest: restNoEmoji, color, title, tags, style,
+      line: lineOffset + i, raw: text.replace(/\r$/, ''), bullet: m[1], box, check: box ? m[2] : null, endRaw: m[4],
+      event: !box, done: box && m[2].trim() !== '', start, end, open, rest: restNoEmoji, color, title, tags, style,
+      priority: priorityOf(tags),
     });
     floor = start;
   });
@@ -126,15 +132,15 @@ function findBlocks(lines, settings) {
   if (b < 0) b = lines.length;
   return [{ anchor: h, tasks: [], start: h, end: b, empty: true, tomorrow: /tomorrow/i.test(lines[h]) }];
 }
-function planFirstTask(lines, tl, start, end, rest, S) {
+function planFirstTask(lines, tl, start, end, rest, S, na) {
   const fresh = findBlocks(lines, S).find(x => x.start === tl.start) || tl;
   const style = S.writeFormat === '12h' ? '12' : '24';
   const times = `(${fmtWrite(start, style)}-${fmtWrite(end, style)}) `;
   for (let i = fresh.start + 1; i < fresh.end; i++) {
     const m = PLACEHOLDER_RE.exec(lines[i]);
-    if (m) return { type: 'replace', i, text: `${m[1]} ${m[3]}${times}${rest || ''}` };
+    if (m) return { type: 'replace', i, text: na ? `${m[1].replace(/\[$/, '')}${times}${rest || ''}` : `${m[1]} ${m[3]}${times}${rest || ''}` };
   }
-  return { type: 'insert', i: fresh.anchor + 1, text: `- [ ] ${times}${rest || ''}` };
+  return { type: 'insert', i: fresh.anchor + 1, text: `- ${na ? '' : '[ ] '}${times}${rest || ''}` };
 }
 function relDay(d) {
   if (!d) return null;
@@ -180,13 +186,14 @@ function styleFor(t, tasks, S) {
 function buildLine(t, ch, style) {
   const start = ch.start ?? t.start, end = ch.end ?? t.end;
   const open = ch.open ?? t.open;
+  const box = ch.na === undefined ? t.box : !ch.na;
   const done = ch.done ?? t.done;
-  const check = ch.done === undefined ? t.check : (done ? 'x' : ' ');
+  const check = !box ? null : (ch.done === undefined && t.box ? t.check : (done ? 'x' : ' '));
   const color = ch.color === undefined ? t.color : ch.color;
   let rest = (ch.rest ?? t.rest).replace(EMOJI_RE, '').replace(/\s{2,}/g, ' ').trim();
   if (color) rest = rest ? `${rest} ${color}` : color;
   const e = open ? (t.open && t.endRaw ? t.endRaw : '?') : fmtWrite(end, style);
-  return `${t.pre}${check}${t.mid}(${fmtWrite(start, style)}-${e}) ${rest}`.replace(/\s+$/, '');
+  return `${t.bullet}${box ? `[${check}] ` : ''}(${fmtWrite(start, style)}-${e}) ${rest}`.replace(/\s+$/, '');
 }
 
 /* Pure planners: given current lines, return one edit op (or null). */
@@ -194,10 +201,10 @@ function locate(lines, t) {
   if (lines[t.line] !== undefined && lines[t.line].replace(/\r$/, '') === t.raw) return t.line;
   return lines.findIndex(l => l.replace(/\r$/, '') === t.raw);
 }
-function planInsert(lines, tl, start, end, rest, S) {
+function planInsert(lines, tl, start, end, rest, S, na) {
   const proto = tl.tasks[0];
   const style = styleFor(null, tl.tasks, S);
-  const text = `${proto.pre} ${proto.mid}(${fmtWrite(start, style)}-${fmtWrite(end, style)}) ${rest || ''}`;
+  const text = `${proto.bullet}${na ? '' : '[ ] '}(${fmtWrite(start, style)}-${fmtWrite(end, style)}) ${rest || ''}`;
   // place in time order within the section
   const fresh = findTimelines(lines, S).find(x => x.start === tl.start) || tl;
   const after = fresh.tasks.find(x => x.start > start);
@@ -242,7 +249,7 @@ function insertIntoDay(data, text, S) {
 
 /* ---------- plain to-dos (send to tomorrow) ---------- */
 
-const TASK_LINE_RE = /^\s*[-*+]\s+\[.\]\s+/;
+const TASK_LINE_RE = /^\s*[-*+]\s+(?:\[.\]\s+|\(\s*\d)/;   // checkbox item, or a timed item without one
 const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
 /* A task line plus its indented sub-items: [start, endExclusive] */
 function taskBlockAt(lines, i) {
@@ -285,6 +292,7 @@ function el(tag, cls, text) {
 }
 function colorFor(t, S) {
   if (t.color && EMOJI_HEX[t.color]) return EMOJI_HEX[t.color];
+  if (t.event) return EVENT_GREY;
   const map = S.tagColors || {};
   for (const tag of t.tags) {
     const k = Object.keys(map).find(x => x.toLowerCase() === tag.toLowerCase());
@@ -352,7 +360,8 @@ function renderTimeline(tl, settings, opts = {}) {
   const root = el('div', 'qtl');
   if (opts.collapsed) root.classList.add('qtl-collapsed');
   if (opts.api) root.classList.add('qtl-interactive');
-  const { gaps, busy } = freeGaps(tasks);
+  const { gaps } = freeGaps(tasks);
+  const busy = freeGaps(tasks.filter(t => !t.event)).busy;
   const free = gaps.reduce((a, [s, e]) => a + e - s, 0);
   const head = el('div', 'qtl-head');
   let openCreateFromPlus = null;
@@ -408,6 +417,8 @@ function renderTimeline(tl, settings, opts = {}) {
     const c = colorFor(t, S);
     if (c) b.style.setProperty('--qtl-c', c);
     if (t.done) b.classList.add('qtl-done');
+    if (t.event) b.classList.add('qtl-event');
+    if (t.priority) b.classList.add('qtl-prio-' + t.priority);
     if (t.open) b.classList.add('qtl-open');
     if (h < 34) b.classList.add('qtl-compact');
     b.append(el('span', 'qtl-title', t.title), el('span', 'qtl-meta', metaText(t, t.start, t.end, t.open)));
@@ -657,7 +668,7 @@ function attachInteractions(c) {
 function openPopup(t, anchor, tl, S, opts, init) {
   const api = opts.api;
   const creating = !t;
-  if (creating) t = { rest: '', start: init.start, end: init.end, open: false, color: null, done: false };
+  if (creating) t = { rest: '', start: init.start, end: init.end, open: false, color: null, done: false, event: false };
   const pop = el('div', 'qtl-pop');
   if (creating) pop.classList.add('qtl-pop-create');
   const toTime = m => { m = ((m % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
@@ -675,7 +686,12 @@ function openPopup(t, anchor, tl, S, opts, init) {
     dur.textContent = fmtDur((b - a + 1440) % 1440 || 1440);
   };
   sIn.addEventListener('input', refreshDur); eIn.addEventListener('input', refreshDur); refreshDur();
-  row1.append(sIn, el('span', 'qtl-pop-arrow', '→'), eIn, dur);
+  let na = !!t.event;
+  const naB = el('button', 'qtl-btn qtl-na', 'N/A'); naB.type = 'button';
+  naB.title = 'No checkbox: a plain time block (lunch, travel, lessons…)';
+  const syncNa = () => { naB.classList.toggle('is-on', na); if (typeof doneB !== 'undefined' && doneB) doneB.style.display = na ? 'none' : ''; };
+  naB.addEventListener('click', ev => { ev.preventDefault(); na = !na; syncNa(); });
+  row1.append(sIn, el('span', 'qtl-pop-arrow', '→'), eIn, naB, dur);
 
   let dIn = null;
   const row2 = el('div', 'qtl-pop-row');
@@ -705,6 +721,7 @@ function openPopup(t, anchor, tl, S, opts, init) {
   doneB.type = 'button';
   doneB.addEventListener('click', ev => { ev.preventDefault(); done = !done; doneB.textContent = done ? '✓ Done' : '○ Not done'; doneB.classList.toggle('is-on', done); });
   doneB.classList.toggle('is-on', done);
+  syncNa();
   const delB = el('button', 'qtl-btn qtl-btn-danger', 'Delete'); delB.type = 'button';
   let armed = false;
   delB.addEventListener('click', ev => {
@@ -748,7 +765,7 @@ function openPopup(t, anchor, tl, S, opts, init) {
     const a = fromTime(sIn.value);
     if (a == null) { sIn.focus(); return; }
     let b = fromTime(eIn.value);
-    const ch = { rest: title.value.trim(), done, color, start: a };
+    const ch = { rest: title.value.trim(), done: na ? false : done, color, start: a, na };
     if (b == null) ch.open = true;
     else { if (b <= a) b += 1440; ch.end = b; ch.open = false; }
     close();
@@ -866,13 +883,13 @@ function makeApi(plugin, acc, tl, path) {
       if (ch.color) rest = rest ? `${rest} ${ch.color}` : ch.color;
       if (iso) {
         try {
-          const text = `- [ ] (${fmtWrite(ch.start, sty)}-${fmtWrite(ch.end, sty)}) ${rest}`.replace(/\s+$/, '');
+          const text = `- ${ch.na ? '' : '[ ] '}(${fmtWrite(ch.start, sty)}-${fmtWrite(ch.end, sty)}) ${rest}`.replace(/\s+$/, '');
           const target = await plugin.insertIntoDate(text, iso, path);
           new obsidian.Notice(`Added to ${target.basename}`);
         } catch (err) { console.error(err); new obsidian.Notice('Quotidian Timeline: could not add task — ' + err.message); }
         return;
       }
-      return run(lines => (tl2.empty ? planFirstTask : planInsert)(lines, tl2, ch.start, ch.end, rest, S));
+      return run(lines => (tl2.empty ? planFirstTask : planInsert)(lines, tl2, ch.start, ch.end, rest, S, ch.na));
     },
     contextMenu(t, ev, openEdit) {
       if (!obsidian || !obsidian.Menu) return;
@@ -881,7 +898,7 @@ function makeApi(plugin, acc, tl, path) {
       const next = new Date(base); next.setDate(next.getDate() + 1);
       m.addItem(i => i.setTitle('Send to tomorrow').setIcon('calendar-plus').onClick(() => this.moveToDate(t, {}, isoDate(next))));
       m.addItem(i => i.setTitle('Edit…').setIcon('pencil').onClick(openEdit));
-      m.addItem(i => i.setTitle(t.done ? 'Mark not done' : 'Mark done').setIcon('check').onClick(() => this.update(t, { done: !t.done })));
+      if (!t.event) m.addItem(i => i.setTitle(t.done ? 'Mark not done' : 'Mark done').setIcon('check').onClick(() => this.update(t, { done: !t.done })));
       m.addSeparator();
       m.addItem(i => { i.setTitle('Delete').setIcon('trash').onClick(() => this.remove(t)); if (i.setWarning) i.setWarning(true); });
       m.showAtMouseEvent(ev);
@@ -1380,4 +1397,4 @@ class QTLSettingTab extends SettingTabBase {
 }
 
 module.exports = QuotidianTimelinePlugin;
-module.exports.__test = { taskBlockAt, insertUntimedIntoDay, dedent, headingAbove, emptyChecker, defaultStart, findBlocks, planFirstTask, renderEmpty, relDay, templateMatcher, isTarget, VERSION, parseTasks, findTimelines, renderTimeline, buildLine, planInsert, applyOp, insertIntoDay, locate, styleFor, DEFAULT_SETTINGS };
+module.exports.__test = { priorityOf, taskBlockAt, insertUntimedIntoDay, dedent, headingAbove, emptyChecker, defaultStart, findBlocks, planFirstTask, renderEmpty, relDay, templateMatcher, isTarget, VERSION, parseTasks, findTimelines, renderTimeline, buildLine, planInsert, applyOp, insertIntoDay, locate, styleFor, DEFAULT_SETTINGS };

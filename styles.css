@@ -205,3 +205,47 @@
 .qtl-plus:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
 @media (pointer: coarse) { .qtl-plus { width: 26px; height: 22px; } }
 .qtl-pop-create .qtl-pop-title { font-weight: 600; }
+
+/* ---------- 0.9.0 ---------- */
+/* no-checkbox time blocks: striped like the free gaps, grey unless coloured */
+.qtl-block.qtl-event {
+  background:
+    repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--qtl-c) 35%, transparent) 6px 7px),
+    color-mix(in srgb, var(--qtl-c) 10%, var(--background-secondary));
+  border-left-style: dashed;
+}
+.qtl-block.qtl-event .qtl-title { font-weight: 500; }
+
+/* priority tags: #Hp reddish-orange, #Mp orange, #Lp yellow-orange — soft glow */
+.qtl-block[class*="qtl-prio-"] { overflow: visible; }
+.qtl-prio-hp { --qtl-glow: #ff5a36; }
+.qtl-prio-mp { --qtl-glow: #ff9500; }
+.qtl-prio-lp { --qtl-glow: #ffbf2e; }
+.qtl-block[class*="qtl-prio-"] {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--qtl-glow) 70%, transparent),
+              0 0 10px 1px color-mix(in srgb, var(--qtl-glow) 45%, transparent);
+  animation: qtl-glow 3.2s ease-in-out infinite;
+}
+@keyframes qtl-glow {
+  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--qtl-glow) 60%, transparent), 0 0 6px 0 color-mix(in srgb, var(--qtl-glow) 30%, transparent); }
+  50%      { box-shadow: 0 0 0 1px color-mix(in srgb, var(--qtl-glow) 85%, transparent), 0 0 14px 2px color-mix(in srgb, var(--qtl-glow) 50%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .qtl-block[class*="qtl-prio-"] { animation: none; } }
+/* lane needs room for the glow at the edges */
+.qtl-scroll { padding: 0 2px; }
+
+/* the same tags glow wherever they appear in your notes (reading view + live preview) */
+a.tag[href="#hp" i], .cm-hashtag[class*="cm-tag-hp" i] { --qtl-glow: #ff5a36; }
+a.tag[href="#mp" i], .cm-hashtag[class*="cm-tag-mp" i] { --qtl-glow: #ff9500; }
+a.tag[href="#lp" i], .cm-hashtag[class*="cm-tag-lp" i] { --qtl-glow: #ffbf2e; }
+a.tag[href="#hp" i], a.tag[href="#mp" i], a.tag[href="#lp" i],
+.cm-hashtag[class*="cm-tag-hp" i], .cm-hashtag[class*="cm-tag-mp" i], .cm-hashtag[class*="cm-tag-lp" i] {
+  color: var(--qtl-glow) !important;
+  background-color: color-mix(in srgb, var(--qtl-glow) 16%, transparent) !important;
+  text-shadow: 0 0 6px color-mix(in srgb, var(--qtl-glow) 70%, transparent);
+  font-weight: 600;
+}
+
+/* N/A toggle in the add/edit menu */
+.qtl-pop .qtl-na { padding: 3px 8px; font-weight: 600; color: var(--text-muted); }
+.qtl-pop .qtl-na.is-on { color: var(--text-on-accent, #fff); background: var(--interactive-accent); }
