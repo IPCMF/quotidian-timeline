@@ -16,7 +16,7 @@ const COLOR_EMOJI = [
 const EMOJI_HEX = Object.fromEntries(COLOR_EMOJI.map(([e, h]) => [e, h]));
 const EMOJI_RE = /(🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫)️?/gu;
 
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 
 const DEFAULT_SETTINGS = {
   folder: '',             // '' = any note named like "26.10.08, ..."
