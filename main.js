@@ -16,7 +16,7 @@ const COLOR_EMOJI = [
 const EMOJI_HEX = Object.fromEntries(COLOR_EMOJI.map(([e, h]) => [e, h]));
 const EMOJI_RE = /(🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫)️?/gu;
 
-const VERSION = '0.9.1';
+const VERSION = '0.9.2';
 
 const DEFAULT_SETTINGS = {
   folder: '',             // '' = any note named like "26.10.08, ..."
@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS = {
   tagColors: { Ma: '#3e8ef7', Fm: '#8e4ec6', Ph: '#30a46c', Ec: '#e9a70c', HP: '#e5484d', MATS: '#12a594' },
   collapsedDesktop: false,
   collapsedMobile: false,
+  hideEventLines: true,   // hide no-checkbox time blocks from the note text (timeline only)
   swapArrows: false,
   cleanupEnabled: true,   // trash untouched template-only day notes
   cleanupDays: 3,      // false: ◀ earlier day, ▶ later day
@@ -1024,11 +1025,55 @@ class QuotidianTimelinePlugin extends PluginBase {
     });
     this.registerEditorExtension(field);
 
+    // Editing view: tuck away no-checkbox time lines (shown again when the cursor is on them, e.g. via "Go to line")
+    const buildHidden = state => {
+      if (!plugin.settings.hideEventLines) return Decoration.none;
+      const info = state.field(obsidian.editorInfoField, false);
+      const path = info && info.file && info.file.path;
+      if (!isTarget(path, plugin.settings.folder)) return Decoration.none;
+      try {
+        const doc = state.doc, sel = state.selection.main;
+        const lines = doc.toString().split('\n');
+        const hide = new Set();
+        for (const tl of findTimelines(lines, plugin.settings)) for (const t of tl.tasks) if (t.event) hide.add(t.line);
+        const b = new RangeSetBuilder();
+        let i = 0;
+        while (i < lines.length) {
+          if (!hide.has(i)) { i++; continue; }
+          let j = i;
+          while (hide.has(j + 1)) j++;
+          const from = doc.line(i + 1).from, to = doc.line(j + 1).to;
+          const touched = sel.from <= to && sel.to >= from;
+          if (!touched) b.add(from, to, Decoration.replace({ block: true }));
+          i = j + 1;
+        }
+        return b.finish();
+      } catch (err) { console.error('[Quotidian Timeline]', err); return Decoration.none; }
+    };
+    const hiddenField = StateField.define({
+      create: buildHidden,
+      update(deco, tr) {
+        if (tr.docChanged || tr.selection || tr.effects.some(e => e.is(refresh))) return buildHidden(tr.state);
+        return deco;
+      },
+      provide: f => EditorView.decorations.from(f),
+    });
+    this.registerEditorExtension(hiddenField);
+
     // Reading view
     this.registerMarkdownPostProcessor((elem, ctx) => { try {
       if (!isTarget(ctx.sourcePath, this.settings.folder)) return;
       const info = ctx.getSectionInfo(elem);
       if (!info) return;
+      // Reading view: hide no-checkbox time lines (they live on the timeline)
+      if (this.settings.hideEventLines) {
+        const all0 = info.text.split('\n');
+        elem.querySelectorAll('li[data-line]').forEach(li => {
+          const k = info.lineStart + Number(li.getAttribute('data-line'));
+          const m = TASK_RE.exec(all0[k] || '');
+          if (m && m[2] === undefined && parseClock(m[3])) li.classList.add('qtl-hidden-line');
+        });
+      }
       // Reading view: right-click a task item → Send to tomorrow
       if (elem.querySelector('li[data-line]')) {
         elem.addEventListener('contextmenu', ev => {
@@ -1347,6 +1392,9 @@ class QTLSettingTab extends SettingTabBase {
     num('Pixels per hour', 'Vertical scale.', 'pxPerHour', 20, 200);
     num('Max height on desktop (px)', 'Taller timelines scroll inside this.', 'maxHeight', 120, 2000);
     num('Max height on phone/iPad (px)', '', 'mobileMaxHeight', 80, 2000);
+    new S(containerEl).setName('Hide time blocks in notes')
+      .setDesc('No-checkbox items like "- (12:00-13:00) Lunch" only show on the timeline, not in the list. (Other devices without the plugin still show the text.)')
+      .addToggle(t => t.setValue(p.settings.hideEventLines).onChange(async v => { p.settings.hideEventLines = v; await save(); }));
     new S(containerEl).setName('Swap day arrows').setDesc('Off: ◀ = earlier day, ▶ = later day. On: the reverse.')
       .addToggle(t => t.setValue(p.settings.swapArrows).onChange(async v => { p.settings.swapArrows = v; await save(); }));
 

@@ -237,3 +237,6 @@
 /* N/A toggle in the add/edit menu */
 .qtl-pop .qtl-na { padding: 3px 8px; font-weight: 600; color: var(--text-muted); }
 .qtl-pop .qtl-na.is-on { color: var(--text-on-accent, #fff); background: var(--interactive-accent); }
+
+/* 0.9.2: no-checkbox time lines live on the timeline, not in the list */
+.markdown-preview-view li.qtl-hidden-line, .markdown-rendered li.qtl-hidden-line { display: none; }
